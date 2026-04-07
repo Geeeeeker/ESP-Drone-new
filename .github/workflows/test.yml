@@ -1,0 +1,265 @@
+name: Build ESP-Drone Firmware & Client
+
+on:
+  workflow_dispatch:
+    inputs:
+      board:
+        description: 'Target chip'
+        required: true
+        default: 'esp32'
+        type: choice
+        options:
+          - esp32
+          - esp32s2
+          - esp32s3
+      firmware_repo:
+        description: 'Git repo of ESP-Drone firmware'
+        required: true
+        default: 'https://gitlab.espressif.cn:6688/esp-college/esp-plane.git'
+      firmware_branch:
+        description: 'Branch of firmware repo'
+        required: true
+        default: 'feature/develop'
+      custom_pins:
+        description: |
+          Custom pin assignments (key=value, one per line)
+          Example:
+          CONFIG_MPU6050_SCL=10
+          CONFIG_MPU6050_SDA=11
+          CONFIG_MOTOR1_PIN=5
+          CONFIG_LED_BLUE_PIN=7
+          CONFIG_CAM_VSYNC=13
+        required: false
+        default: ''
+      phy_power_boost:
+        description: 'Set WiFi TX power to 20dBm (higher power, faster battery drain)'
+        required: true
+        default: true
+        type: boolean
+      cfclient_repo:
+        description: 'Git repo of cfclient (PC control software)'
+        required: true
+        default: 'https://github.com/qljz1993/crazyflie-clients-python.git'
+      cfclient_branch:
+        description: 'Branch of cfclient'
+        required: true
+        default: 'dev_esplane'
+      release_tag:
+        description: 'Release tag (leave empty for auto-generate)'
+        required: false
+        default: ''
+      create_release:
+        description: 'Create a GitHub Release and upload artifacts'
+        required: true
+        default: true
+        type: boolean
+
+env:
+  IDF_VERSION: v5.0.4   # 与 README 建议一致
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      # ---------- 1. 检出固件仓库 ----------
+      - name: Checkout firmware repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.inputs.firmware_repo }}
+          ref: ${{ github.event.inputs.firmware_branch }}
+          path: firmware
+          submodules: 'recursive'
+
+      # ---------- 2. 安装 Python ----------
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # ---------- 3. 编译固件 ----------
+      - name: Build firmware with ESP-IDF
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: ${{ env.IDF_VERSION }}
+          target: ${{ inputs.board }}
+          path: firmware
+          command: |
+            # ----- 3.1 修改链接脚本（添加 param/log 段）-----
+            echo "Modifying linker script for param/log sections..."
+            BOARD_SHORT="${{ inputs.board }}"
+            case "$BOARD_SHORT" in
+              esp32)
+                LD_FILE="$IDF_PATH/components/esp32/ld/esp32.project.ld.in"
+                ;;
+              esp32s2)
+                LD_FILE="$IDF_PATH/components/esp32s2/ld/esp32s2.project.ld.in"
+                ;;
+              esp32s3)
+                LD_FILE="$IDF_PATH/components/esp32s3/ld/esp32s3.project.ld.in"
+                ;;
+            esac
+            if [ -f "$LD_FILE" ]; then
+              # 检查是否已经添加过，避免重复
+              if ! grep -q "_param_start" "$LD_FILE"; then
+                sudo sed -i '/^SECTIONS$/a\
+              /* Parameters and log system datas */\
+              _param_start = .;\
+              KEEP(*(.param))\
+              KEEP(*(.param.*))\
+              _param_stop = .;\
+              . = ALIGN(4);\
+              _log_start = .;\
+              KEEP(*(.log))\
+              KEEP(*(.log.*))\
+              _log_stop = .;\
+              . = ALIGN(4);' "$LD_FILE"
+                echo "✅ Linker script patched: $LD_FILE"
+              else
+                echo "Linker script already patched, skipping."
+              fi
+            else
+              echo "⚠️ Linker script not found: $LD_FILE"
+            fi
+
+            # ----- 3.2 应用自定义引脚配置 -----
+            if [ -n "${{ inputs.custom_pins }}" ]; then
+              echo "Applying custom pin configuration..."
+              echo "${{ inputs.custom_pins }}" >> sdkconfig
+              idf.py reconfigure
+            fi
+
+            # ----- 3.3 提高 PHY 增益（可选）-----
+            if [ "${{ inputs.phy_power_boost }}" == "true" ]; then
+              echo "Setting WiFi TX power to 20dBm..."
+              echo "CONFIG_ESP32_PHY_MAX_TX_POWER=20" >> sdkconfig
+              # 针对不同芯片可能配置名不同，但 ESP-IDF 会自动适配
+              idf.py reconfigure
+            fi
+
+            # ----- 3.4 正式编译 -----
+            idf.py build
+
+      # ---------- 4. 打包固件 ----------
+      - name: Package firmware artifacts
+        id: package_fw
+        run: |
+          cd firmware
+          BOARD="${{ inputs.board }}"
+          TAG="${{ inputs.release_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="manual-$(date +'%Y%m%d-%H%M%S')"
+          fi
+          FW_ARTIFACT="esp-drone-firmware-${BOARD}-${TAG}.zip"
+          mkdir -p fw_artifacts
+          cp build/*.bin fw_artifacts/ 2>/dev/null || true
+          cp build/bootloader/*.bin fw_artifacts/ 2>/dev/null || true
+          cp build/partition_table/*.bin fw_artifacts/ 2>/dev/null || true
+          zip -j "$FW_ARTIFACT" fw_artifacts/*.bin
+          echo "fw_artifact_path=$(realpath $FW_ARTIFACT)" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          # 保存 TAG 供后续步骤使用
+          echo "TAG=$TAG" >> $GITHUB_ENV
+
+      # ---------- 5. 打包 PC 控制软件 (cfclient) ----------
+      - name: Checkout cfclient repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.cfclient_repo }}
+          ref: ${{ inputs.cfclient_branch }}
+          path: cfclient
+          submodules: 'recursive'
+
+      - name: Package cfclient (PC control software)
+        id: package_cfclient
+        run: |
+          cd cfclient
+          CLIENT_ARTIFACT="cfclient-${TAG}.zip"
+          # 创建打包目录，包含源码和安装说明
+          mkdir -p package/cfclient
+          cp -r . package/cfclient/
+          # 生成安装脚本（Linux）
+          cat > package/install_linux.sh << 'EOF'
+          #!/bin/bash
+          set -e
+          echo "Installing cfclient dependencies..."
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-pip python3-pyqt5 python3-pyqt5.qtsvg
+          cd cfclient
+          pip3 install -r requirements.txt
+          # 安装 crtp 协议支持包（如果仓库里没有，需要额外克隆）
+          if [ ! -d "../crazyflie-lib-python" ]; then
+            git clone -b dev_esplane https://github.com/qljz1993/crazyflie-lib-python.git ../crazyflie-lib-python
+            pip3 install -e ../crazyflie-lib-python
+          fi
+          pip3 install -e .
+          echo "Installation complete. Run 'python3 bin/cfclient' to start."
+          EOF
+          chmod +x package/install_linux.sh
+          # 生成 README
+          cat > package/README.md << EOF
+          # ESP-Drone PC Control Software (cfclient)
+
+          This package contains the modified cfclient for ESP-Drone.
+
+          ## Installation (Ubuntu/Debian)
+
+          1. Extract this zip file.
+          2. Run \`./install_linux.sh\` (or manually follow the steps inside).
+          3. Launch client: \`python3 cfclient/bin/cfclient\`
+
+          ## Requirements
+
+          - Python 3.7+
+          - PyQt5
+          - CRTP protocol support (installed automatically by the script)
+
+          For other OS, please refer to the official cfclient documentation.
+          EOF
+          cd package
+          zip -r "../$CLIENT_ARTIFACT" .
+          echo "client_artifact_path=$(realpath ../$CLIENT_ARTIFACT)" >> $GITHUB_OUTPUT
+
+      # ---------- 6. 上传到 GitHub Release ----------
+      - name: Create GitHub Release and upload assets
+        if: inputs.create_release == true
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ env.TAG }}
+          name: "ESP-Drone Release ${{ env.TAG }}"
+          body: |
+            ## Firmware
+            - Chip: ${{ inputs.board }}
+            - Custom pins: ${{ inputs.custom_pins || 'default' }}
+            - WiFi TX power: ${{ inputs.phy_power_boost && '20dBm' || 'default' }}
+            
+            ## PC Client
+            - Source: ${{ inputs.cfclient_repo }} (branch ${{ inputs.cfclient_branch }})
+            
+            ## How to use
+            - **Flash firmware**: Use ESP-IDF toolchain or `esptool.py` to flash the `.bin` files.
+            - **Run client**: Extract `cfclient-*.zip` and run `./install_linux.sh` (Ubuntu/Debian) or follow the README.
+          files: |
+            ${{ steps.package_fw.outputs.fw_artifact_path }}
+            ${{ steps.package_cfclient.outputs.client_artifact_path }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ---------- 7. （可选）上传到 Actions artifacts 供调试 ----------
+      - name: Upload firmware artifact to workflow run
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware_${{ env.TAG }}
+          path: ${{ steps.package_fw.outputs.fw_artifact_path }}
+          if-no-files-found: error
+
+      - name: Upload cfclient artifact to workflow run
+        uses: actions/upload-artifact@v4
+        with:
+          name: cfclient_${{ env.TAG }}
+          path: ${{ steps.package_cfclient.outputs.client_artifact_path }}
+          if-no-files-found: error
