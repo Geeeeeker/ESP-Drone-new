@@ -1,4 +1,4 @@
-name: Build ESP-Drone Firmware & Client
+name: Build ESP-Drone Firmware & Cross-Platform Client
 
 on:
   workflow_dispatch:
@@ -28,14 +28,6 @@ on:
         required: true
         default: true
         type: boolean
-      cfclient_repo:
-        description: 'Git repo of cfclient (owner/repo format)'
-        required: true
-        default: 'qljz1993/crazyflie-clients-python'
-      cfclient_branch:
-        description: 'Branch of cfclient'
-        required: true
-        default: 'dev_esplane'
       release_tag:
         description: 'Release tag (leave empty for auto-generate)'
         required: false
@@ -50,94 +42,80 @@ env:
   IDF_VERSION: v5.0.4
 
 jobs:
-  build:
+  # ========== 1. 编译固件 (Ubuntu) ==========
+  build_firmware:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
+    outputs:
+      tag: ${{ steps.prepare_tag.outputs.tag }}
+      fw_artifact_path: ${{ steps.package_fw.outputs.fw_artifact_path }}
     steps:
-      # ---------- 1. 检出固件仓库（当前仓库）----------
       - name: Checkout firmware repository
         uses: actions/checkout@v4
         with:
           submodules: 'recursive'
 
-      # ---------- 2. 安装 Python ----------
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # ---------- 3. 编译固件 ----------
-      - name: Build firmware with ESP-IDF
+      - name: Build with ESP-IDF
         uses: espressif/esp-idf-ci-action@v1
         with:
           esp_idf_version: ${{ env.IDF_VERSION }}
           target: ${{ inputs.board }}
           path: .
           command: |
-            # ----- 3.1 修改链接脚本（添加 param/log 段）-----
-            echo "Modifying linker script for param/log sections..."
+            # 修改链接脚本
             BOARD_SHORT="${{ inputs.board }}"
             case "$BOARD_SHORT" in
-              esp32)
-                LD_FILE="$IDF_PATH/components/esp32/ld/esp32.project.ld.in"
-                ;;
-              esp32s2)
-                LD_FILE="$IDF_PATH/components/esp32s2/ld/esp32s2.project.ld.in"
-                ;;
-              esp32s3)
-                LD_FILE="$IDF_PATH/components/esp32s3/ld/esp32s3.project.ld.in"
-                ;;
+              esp32) LD_FILE="$IDF_PATH/components/esp32/ld/esp32.project.ld.in" ;;
+              esp32s2) LD_FILE="$IDF_PATH/components/esp32s2/ld/esp32s2.project.ld.in" ;;
+              esp32s3) LD_FILE="$IDF_PATH/components/esp32s3/ld/esp32s3.project.ld.in" ;;
             esac
-            if [ -f "$LD_FILE" ]; then
-              if ! grep -q "_param_start" "$LD_FILE"; then
-                sudo sed -i '/^SECTIONS$/a\
-  /* Parameters and log system datas */\
-  _param_start = .;\
-  KEEP(*(.param))\
-  KEEP(*(.param.*))\
-  _param_stop = .;\
-  . = ALIGN(4);\
-  _log_start = .;\
-  KEEP(*(.log))\
-  KEEP(*(.log.*))\
-  _log_stop = .;\
-  . = ALIGN(4);' "$LD_FILE"
-                echo "✅ Linker script patched: $LD_FILE"
-              else
-                echo "Linker script already patched, skipping."
-              fi
-            else
-              echo "⚠️ Linker script not found: $LD_FILE"
+            if [ -f "$LD_FILE" ] && ! grep -q "_param_start" "$LD_FILE"; then
+              sudo sed -i '/^SECTIONS$/a\
+              /* Parameters and log system datas */\
+              _param_start = .;\
+              KEEP(*(.param))\
+              KEEP(*(.param.*))\
+              _param_stop = .;\
+              . = ALIGN(4);\
+              _log_start = .;\
+              KEEP(*(.log))\
+              KEEP(*(.log.*))\
+              _log_stop = .;\
+              . = ALIGN(4);' "$LD_FILE"
             fi
-
-            # ----- 3.2 应用自定义引脚配置 -----
+            # 自定义引脚
             if [ -n "${{ inputs.custom_pins }}" ]; then
-              echo "Applying custom pin configuration..."
               echo "${{ inputs.custom_pins }}" >> sdkconfig
               idf.py reconfigure
             fi
-
-            # ----- 3.3 提高 PHY 增益（可选）-----
+            # 提高 PHY 增益
             if [ "${{ inputs.phy_power_boost }}" == "true" ]; then
-              echo "Setting WiFi TX power to 20dBm..."
               echo "CONFIG_ESP32_PHY_MAX_TX_POWER=20" >> sdkconfig
               idf.py reconfigure
             fi
-
-            # ----- 3.4 正式编译 -----
             idf.py build
 
-      # ---------- 4. 打包固件 ----------
-      - name: Package firmware artifacts
-        id: package_fw
+      - name: Prepare tag
+        id: prepare_tag
         run: |
-          BOARD="${{ inputs.board }}"
           TAG="${{ inputs.release_tag }}"
           if [ -z "$TAG" ]; then
             TAG="manual-$(date +'%Y%m%d-%H%M%S')"
           fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "TAG=$TAG" >> $GITHUB_ENV
+
+      - name: Package firmware
+        id: package_fw
+        run: |
+          BOARD="${{ inputs.board }}"
+          TAG="${{ env.TAG }}"
           FW_ARTIFACT="esp-drone-firmware-${BOARD}-${TAG}.zip"
           mkdir -p fw_artifacts
           cp build/*.bin fw_artifacts/ 2>/dev/null || true
@@ -145,101 +123,162 @@ jobs:
           cp build/partition_table/*.bin fw_artifacts/ 2>/dev/null || true
           zip -j "$FW_ARTIFACT" fw_artifacts/*.bin
           echo "fw_artifact_path=$(realpath $FW_ARTIFACT)" >> $GITHUB_OUTPUT
-          echo "tag=$TAG" >> $GITHUB_ENV
 
-      # ---------- 5. 打包 PC 控制软件 (cfclient) ----------
-      - name: Checkout cfclient repository
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ inputs.cfclient_repo }}
-          ref: ${{ inputs.cfclient_branch }}
-          path: cfclient
-          submodules: 'recursive'
-
-      - name: Package cfclient (PC control software)
-        id: package_cfclient
-        run: |
-          cd cfclient
-          CLIENT_ARTIFACT="cfclient-${TAG}.zip"
-          mkdir -p package/cfclient
-          cp -r . package/cfclient/
-          cat > package/install_linux.sh << 'EOF'
-          #!/bin/bash
-          set -e
-          echo "Installing cfclient dependencies..."
-          sudo apt-get update
-          sudo apt-get install -y python3 python3-pip python3-pyqt5 python3-pyqt5.qtsvg
-          cd cfclient
-          pip3 install -r requirements.txt
-          if [ ! -d "../crazyflie-lib-python" ]; then
-            git clone -b dev_esplane https://github.com/qljz1993/crazyflie-lib-python.git ../crazyflie-lib-python
-            pip3 install -e ../crazyflie-lib-python
-          fi
-          pip3 install -e .
-          echo "Installation complete. Run 'python3 bin/cfclient' to start."
-          EOF
-          chmod +x package/install_linux.sh
-          cat > package/README.md << EOF
-          # ESP-Drone PC Control Software (cfclient)
-
-          This package contains the modified cfclient for ESP-Drone.
-
-          ## Installation (Ubuntu/Debian)
-
-          1. Extract this zip file.
-          2. Run \`./install_linux.sh\` (or manually follow the steps inside).
-          3. Launch client: \`python3 cfclient/bin/cfclient\`
-
-          ## Requirements
-
-          - Python 3.7+
-          - PyQt5
-          - CRTP protocol support (installed automatically by the script)
-
-          For other OS, please refer to the official cfclient documentation.
-          EOF
-          cd package
-          zip -r "../$CLIENT_ARTIFACT" .
-          echo "client_artifact_path=$(realpath ../$CLIENT_ARTIFACT)" >> $GITHUB_OUTPUT
-
-      # ---------- 6. 上传到 GitHub Release ----------
-      - name: Create GitHub Release and upload assets
-        if: inputs.create_release == true
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: ${{ env.TAG }}
-          name: "ESP-Drone Release ${{ env.TAG }}"
-          body: |
-            ## Firmware
-            - Chip: ${{ inputs.board }}
-            - Custom pins: ${{ inputs.custom_pins || 'default' }}
-            - WiFi TX power: ${{ inputs.phy_power_boost && '20dBm' || 'default' }}
-            
-            ## PC Client
-            - Source: ${{ inputs.cfclient_repo }} (branch ${{ inputs.cfclient_branch }})
-            
-            ## How to use
-            - **Flash firmware**: Use ESP-IDF toolchain or `esptool.py` to flash the `.bin` files.
-            - **Run client**: Extract `cfclient-*.zip` and run `./install_linux.sh` (Ubuntu/Debian) or follow the README.
-          files: |
-            ${{ steps.package_fw.outputs.fw_artifact_path }}
-            ${{ steps.package_cfclient.outputs.client_artifact_path }}
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # ---------- 7. （可选）上传到 Actions artifacts 供调试 ----------
-      - name: Upload firmware artifact to workflow run
+      - name: Upload firmware artifact (temporary)
         uses: actions/upload-artifact@v4
         with:
           name: firmware_${{ env.TAG }}
           path: ${{ steps.package_fw.outputs.fw_artifact_path }}
           if-no-files-found: error
 
-      - name: Upload cfclient artifact to workflow run
+  # ========== 2. 打包跨平台客户端 (矩阵) ==========
+  build_client:
+    runs-on: ${{ matrix.os }}
+    needs: build_firmware   # 仅为了获取 tag，但也可独立运行
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            pyinstaller_opts: --onefile --name cfclient --add-data "cfclient/bin:bin" --add-data "cfclient/lib:lib"
+            # 实际上需要更详细的 spec，这里简化：使用目录方式打包
+          - os: macos-latest
+            platform: macos
+          - os: windows-latest
+            platform: windows
+    steps:
+      - name: Checkout cfclient repository
+        uses: actions/checkout@v4
+        with:
+          repository: qljz1993/crazyflie-clients-python
+          ref: dev_esplane
+          path: cfclient
+          submodules: 'recursive'
+
+      - name: Checkout crazyflie-lib-python (CRTP)
+        uses: actions/checkout@v4
+        with:
+          repository: qljz1993/crazyflie-lib-python
+          ref: dev_esplane
+          path: crazyflie-lib-python
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pyqt5 python3-pyqt5.qtsvg libgl1-mesa-glx
+          pip install pyinstaller
+
+      - name: Install dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew install pyqt5
+          pip3 install pyinstaller
+
+      - name: Install dependencies (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          pip install pyqt5 pyinstaller
+
+      - name: Install Python packages
+        run: |
+          pip install -e ./crazyflie-lib-python
+          pip install -r ./cfclient/requirements.txt
+          pip install pyinstaller
+
+      - name: Build executable with PyInstaller (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cd cfclient
+          # 创建 spec 文件并打包为单文件
+          pyinstaller --onefile --name cfclient \
+            --add-data "bin:bin" \
+            --add-data "lib:lib" \
+            --add-data "src:src" \
+            --hidden-import PyQt5.sip \
+            bin/cfclient
+          # 打包为 zip
+          cd dist
+          zip -r cfclient-linux-amd64.zip cfclient
+          echo "artifact_path=$(pwd)/cfclient-linux-amd64.zip" >> $GITHUB_OUTPUT
+
+      - name: Build executable with PyInstaller (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          cd cfclient
+          pyinstaller --onefile --windowed --name cfclient \
+            --add-data "bin:bin" \
+            --add-data "lib:lib" \
+            --add-data "src:src" \
+            --hidden-import PyQt5.sip \
+            bin/cfclient
+          cd dist
+          zip -r cfclient-macos.zip cfclient.app
+          echo "artifact_path=$(pwd)/cfclient-macos.zip" >> $GITHUB_OUTPUT
+
+      - name: Build executable with PyInstaller (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: cmd
+        run: |
+          cd cfclient
+          pyinstaller --onefile --name cfclient.exe --add-data "bin;bin" --add-data "lib;lib" --add-data "src;src" --hidden-import PyQt5.sip bin\cfclient
+          cd dist
+          powershell Compress-Archive -Path cfclient.exe -DestinationPath cfclient-windows.zip
+          echo "artifact_path=%cd%\cfclient-windows.zip" >> %GITHUB_OUTPUT%
+
+      - name: Upload client artifact (temporary)
         uses: actions/upload-artifact@v4
         with:
-          name: cfclient_${{ env.TAG }}
-          path: ${{ steps.package_cfclient.outputs.client_artifact_path }}
+          name: cfclient_${{ matrix.platform }}_${{ needs.build_firmware.outputs.tag }}
+          path: ${{ steps.build.outputs.artifact_path }}
           if-no-files-found: error
+
+  # ========== 3. 发布到 Release ==========
+  release:
+    runs-on: ubuntu-latest
+    needs: [build_firmware, build_client]
+    if: inputs.create_release == true
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: ls -R artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.build_firmware.outputs.tag }}
+          name: "ESP-Drone Release ${{ needs.build_firmware.outputs.tag }}"
+          body: |
+            ## Firmware
+            - Chip: ${{ inputs.board }}
+            - Custom pins: ${{ inputs.custom_pins || 'default' }}
+            - WiFi TX power: ${{ inputs.phy_power_boost && '20dBm' || 'default' }}
+            
+            ## PC Client Downloads
+            - **Linux**: cfclient_linux_*.zip
+            - **macOS**: cfclient_macos_*.zip
+            - **Windows**: cfclient_windows_*.zip
+            
+            ## How to Use
+            - **Flash firmware**: Use ESP-IDF toolchain or `esptool.py`.
+            - **Run client**: Extract the zip for your OS and run the executable.
+          files: |
+            artifacts/firmware_*/esp-drone-firmware-*.zip
+            artifacts/cfclient_linux_*/cfclient-linux-*.zip
+            artifacts/cfclient_macos_*/cfclient-macos-*.zip
+            artifacts/cfclient_windows_*/cfclient-windows-*.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
