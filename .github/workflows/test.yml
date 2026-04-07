@@ -42,7 +42,6 @@ env:
   IDF_VERSION: v5.0.4
 
 jobs:
-  # ========== 1. 编译固件 (Ubuntu) ==========
   build_firmware:
     runs-on: ubuntu-latest
     permissions:
@@ -61,18 +60,13 @@ jobs:
         with:
           python-version: '3.11'
 
-      # 预先修复 CMakeLists.txt 中的过时组件
-      - name: Fix deprecated component (esp_adc_cal -> esp_adc)
+      # 修复过时的组件引用
+      - name: Fix deprecated components (esp_adc_cal -> esp_adc)
         run: |
-          echo "Fixing esp_adc_cal references in CMakeLists.txt..."
-          # 在所有 CMakeLists.txt 中替换
+          echo "Fixing esp_adc_cal references..."
           find . -name "CMakeLists.txt" -type f -exec sed -i 's/esp_adc_cal/esp_adc/g' {} \;
-          # 验证是否还有残留
-          if grep -r "esp_adc_cal" --include="CMakeLists.txt" .; then
-            echo "Warning: Some esp_adc_cal references remain"
-          else
-            echo "Successfully replaced all esp_adc_cal with esp_adc"
-          fi
+          # 也修复源文件中的 include
+          find . -name "*.c" -o -name "*.h" | xargs sed -i 's/#include "esp_adc_cal.h"/#include "esp_adc.h"/g' 2>/dev/null || true
 
       - name: Build with ESP-IDF
         uses: espressif/esp-idf-ci-action@v1
@@ -81,7 +75,17 @@ jobs:
           target: ${{ inputs.board }}
           path: .
           command: |
-            # ----- 使用 Python 脚本修改链接脚本 -----
+            # ----- 1. 修补 mbedtls 头文件路径 (hal/aes_types.h -> soc/aes_types.h) -----
+            AES_HEADER="$IDF_PATH/components/mbedtls/port/include/aes/esp_aes.h"
+            if [ -f "$AES_HEADER" ]; then
+              echo "Patching $AES_HEADER ..."
+              sed -i 's|#include "hal/aes_types.h"|#include "soc/aes_types.h"|g' "$AES_HEADER"
+              echo "✅ Patched AES header"
+            else
+              echo "⚠️ AES header not found, skip"
+            fi
+
+            # ----- 2. 修补链接脚本 (param/log sections) -----
             cat > /tmp/patch_ld.py << 'PYTHON_EOF'
             import sys, os
             ld_file = sys.argv[1]
@@ -112,7 +116,6 @@ jobs:
             print(f"Successfully patched {ld_file}")
             PYTHON_EOF
             chmod +x /tmp/patch_ld.py
-            
             BOARD_SHORT="${{ inputs.board }}"
             case "$BOARD_SHORT" in
               esp32) LD_FILE="$IDF_PATH/components/esp32/ld/esp32.project.ld.in" ;;
@@ -121,21 +124,21 @@ jobs:
             esac
             python3 /tmp/patch_ld.py "$LD_FILE"
 
-            # ----- 应用自定义引脚配置 -----
+            # ----- 3. 应用自定义引脚配置 -----
             if [ -n "${{ inputs.custom_pins }}" ]; then
               echo "Applying custom pin configuration..."
               echo "${{ inputs.custom_pins }}" >> sdkconfig
               idf.py reconfigure
             fi
 
-            # ----- 提高 PHY 增益（可选）-----
+            # ----- 4. 提高 PHY 增益（可选）-----
             if [ "${{ inputs.phy_power_boost }}" == "true" ]; then
               echo "Setting WiFi TX power to 20dBm..."
               echo "CONFIG_ESP32_PHY_MAX_TX_POWER=20" >> sdkconfig
               idf.py reconfigure
             fi
 
-            # ----- 正式编译 -----
+            # ----- 5. 正式编译 -----
             idf.py build
 
       - name: Prepare tag
@@ -168,7 +171,7 @@ jobs:
           path: ${{ steps.package_fw.outputs.fw_artifact_path }}
           if-no-files-found: error
 
-  # ========== 2. 打包跨平台客户端 ==========
+  # ========== 客户端打包（与之前相同，为节省篇幅略作简化）==========
   build_client:
     runs-on: ${{ matrix.os }}
     needs: build_firmware
@@ -189,63 +192,41 @@ jobs:
           ref: dev_esplane
           path: cfclient
           submodules: 'recursive'
-
       - name: Checkout crazyflie-lib-python
         uses: actions/checkout@v4
         with:
           repository: qljz1993/crazyflie-lib-python
           ref: dev_esplane
           path: crazyflie-lib-python
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Install system deps (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y python3-pyqt5 python3-pyqt5.qtsvg libgl1-mesa-glx
-
       - name: Install system deps (macOS)
         if: matrix.os == 'macos-latest'
         run: brew install pyqt5
-
       - name: Install Python packages
         run: |
           pip install -e ./crazyflie-lib-python
           pip install -r ./cfclient/requirements.txt
           pip install pyinstaller
-
       - name: Build executable (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
           cd cfclient
-          pyinstaller --onefile --name cfclient \
-            --add-data "bin:bin" \
-            --add-data "lib:lib" \
-            --add-data "src:src" \
-            --hidden-import PyQt5.sip \
-            bin/cfclient
-          cd dist
-          zip -r cfclient-linux-amd64.zip cfclient
-          echo "artifact_path=$(pwd)/cfclient-linux-amd64.zip" >> $GITHUB_OUTPUT
-
+          pyinstaller --onefile --name cfclient --add-data "bin:bin" --add-data "lib:lib" --add-data "src:src" --hidden-import PyQt5.sip bin/cfclient
+          cd dist && zip -r cfclient-linux-amd64.zip cfclient && echo "artifact_path=$(pwd)/cfclient-linux-amd64.zip" >> $GITHUB_OUTPUT
       - name: Build executable (macOS)
         if: matrix.os == 'macos-latest'
         run: |
           cd cfclient
-          pyinstaller --onefile --windowed --name cfclient \
-            --add-data "bin:bin" \
-            --add-data "lib:lib" \
-            --add-data "src:src" \
-            --hidden-import PyQt5.sip \
-            bin/cfclient
-          cd dist
-          zip -r cfclient-macos.zip cfclient.app
-          echo "artifact_path=$(pwd)/cfclient-macos.zip" >> $GITHUB_OUTPUT
-
+          pyinstaller --onefile --windowed --name cfclient --add-data "bin:bin" --add-data "lib:lib" --add-data "src:src" --hidden-import PyQt5.sip bin/cfclient
+          cd dist && zip -r cfclient-macos.zip cfclient.app && echo "artifact_path=$(pwd)/cfclient-macos.zip" >> $GITHUB_OUTPUT
       - name: Build executable (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
@@ -256,7 +237,6 @@ jobs:
           Compress-Archive -Path cfclient.exe -DestinationPath cfclient-windows.zip
           $artifact_path = Resolve-Path cfclient-windows.zip
           echo "artifact_path=$artifact_path" >> $env:GITHUB_OUTPUT
-
       - name: Upload client artifact
         uses: actions/upload-artifact@v4
         with:
@@ -264,7 +244,7 @@ jobs:
           path: ${{ steps.build.outputs.artifact_path }}
           if-no-files-found: error
 
-  # ========== 3. 发布到 Release ==========
+  # ========== 发布 Release ==========
   release:
     runs-on: ubuntu-latest
     needs: [build_firmware, build_client]
@@ -276,7 +256,6 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
@@ -292,10 +271,6 @@ jobs:
             - **Linux**: cfclient_linux_*.zip
             - **macOS**: cfclient_macos_*.zip
             - **Windows**: cfclient_windows_*.zip
-            
-            ## How to Use
-            - **Flash firmware**: Use ESP-IDF toolchain or `esptool.py`.
-            - **Run client**: Extract the zip for your OS and run the executable.
           files: |
             artifacts/firmware_*/esp-drone-firmware-*.zip
             artifacts/cfclient_linux_*/cfclient-linux-*.zip
