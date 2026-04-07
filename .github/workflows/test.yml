@@ -61,6 +61,19 @@ jobs:
         with:
           python-version: '3.11'
 
+      # 预先修复 CMakeLists.txt 中的过时组件
+      - name: Fix deprecated component (esp_adc_cal -> esp_adc)
+        run: |
+          echo "Fixing esp_adc_cal references in CMakeLists.txt..."
+          # 在所有 CMakeLists.txt 中替换
+          find . -name "CMakeLists.txt" -type f -exec sed -i 's/esp_adc_cal/esp_adc/g' {} \;
+          # 验证是否还有残留
+          if grep -r "esp_adc_cal" --include="CMakeLists.txt" .; then
+            echo "Warning: Some esp_adc_cal references remain"
+          else
+            echo "Successfully replaced all esp_adc_cal with esp_adc"
+          fi
+
       - name: Build with ESP-IDF
         uses: espressif/esp-idf-ci-action@v1
         with:
@@ -68,9 +81,9 @@ jobs:
           target: ${{ inputs.board }}
           path: .
           command: |
-            # ----- 使用 Python 脚本修改链接脚本 (避免 shell 转义问题) -----
+            # ----- 使用 Python 脚本修改链接脚本 -----
             cat > /tmp/patch_ld.py << 'PYTHON_EOF'
-            import sys, os, re
+            import sys, os
             ld_file = sys.argv[1]
             if not os.path.exists(ld_file):
                 print(f"Linker script not found: {ld_file}")
@@ -93,7 +106,6 @@ jobs:
               _log_stop = .;
               . = ALIGN(4);
             """
-            # 在 SECTIONS 之后的大括号内插入
             content = content.replace('SECTIONS\n{', 'SECTIONS\n{' + insert_text)
             with open(ld_file, 'w') as f:
                 f.write(content)
