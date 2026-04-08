@@ -85,7 +85,8 @@ jobs:
       - name: Set up environment
         run: |
           cd /opt/esp/idf
-          ./export.sh
+          chmod +x export.sh
+          source ./export.sh
           echo "IDF_PATH=/opt/esp/idf" >> $GITHUB_ENV
           echo "$HOME/.espressif/python_env/idf5.0_py3.11_env/bin" >> $GITHUB_PATH
 
@@ -112,17 +113,17 @@ jobs:
           esac
           if [ -f "$LD_FILE" ] && ! grep -q "_param_start" "$LD_FILE"; then
             sudo sed -i '/^SECTIONS$/a\
-              /* Parameters and log system datas */\
-              _param_start = .;\
-              KEEP(*(.param));\
-              KEEP(*(.param.*));\
-              _param_stop = .;\
-              . = ALIGN(4);\
-              _log_start = .;\
-              KEEP(*(.log));\
-              KEEP(*(.log.*));\
-              _log_stop = .;\
-              . = ALIGN(4);' "$LD_FILE"
+  /* Parameters and log system datas */\
+  _param_start = .;\
+  KEEP(*(.param));\
+  KEEP(*(.param.*));\
+  _param_stop = .;\
+  . = ALIGN(4);\
+  _log_start = .;\
+  KEEP(*(.log));\
+  KEEP(*(.log.*));\
+  _log_stop = .;\
+  . = ALIGN(4);' "$LD_FILE"
           fi
 
       # ---------- 编译 ----------
@@ -156,6 +157,7 @@ jobs:
           echo "TAG=$TAG" >> $GITHUB_ENV
 
       - name: Package firmware
+        id: package_fw
         run: |
           BOARD="${{ inputs.board }}"
           TAG="${{ env.TAG }}"
