@@ -1,0 +1,85 @@
+name: Pull Docker Images and Upload to Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag (leave empty for auto-generate)'
+        required: false
+        default: ''
+      create_release:
+        description: 'Create a GitHub Release and upload artifacts'
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  pull-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare directories
+        run: mkdir -p images
+
+      # 定义镜像列表（名称，输出文件名）
+      - name: Pull and save images
+        id: pull_images
+        run: |
+          declare -A images=(
+            ["ubuntu:18.04"]="ubuntu_18.04.tar"
+            ["catthehacker/ubuntu:act-18.04"]="catthehacker_ubuntu_act-18.04.tar"
+          )
+          successful_images=()
+          for img in "${!images[@]}"; do
+            echo "Attempting to pull $img ..."
+            if docker pull "$img"; then
+              echo "Pull successful for $img"
+              outfile="${images[$img]}"
+              echo "Saving to $outfile ..."
+              docker save "$img" -o "images/$outfile"
+              # 压缩以减小大小
+              gzip "images/$outfile"
+              successful_images+=("$img")
+            else
+              echo "Pull failed for $img, skipping."
+            fi
+          done
+          # 输出成功列表供后续步骤使用
+          if [ ${#successful_images[@]} -eq 0 ]; then
+            echo "No images were successfully pulled. Exiting."
+            exit 1
+          fi
+          echo "successful_images=${successful_images[@]}" >> $GITHUB_OUTPUT
+
+      - name: Prepare tag and release name
+        id: release_info
+        run: |
+          TAG="${{ inputs.release_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="docker-images-$(date +'%Y%m%d-%H%M%S')"
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "name=Docker Images ($TAG)" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release and upload assets
+        if: inputs.create_release == true
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_info.outputs.tag }}
+          name: ${{ steps.release_info.outputs.name }}
+          body: |
+            This release contains Docker images successfully pulled from Docker Hub.
+
+            **Images included:**
+            ${{ steps.pull_images.outputs.successful_images }}
+
+            Each image is saved as a `.tar.gz` file (gzipped Docker save format).
+
+            To load an image:
+            ```bash
+            gunzip -c image.tar.gz | docker load
