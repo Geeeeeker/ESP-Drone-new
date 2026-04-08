@@ -50,7 +50,7 @@ jobs:
             echo "No images were successfully pulled. Exiting."
             exit 1
           fi
-          # 将镜像列表保存为换行分隔的字符串，用于 Release Body
+          # 将镜像列表保存为多行文本
           printf -v images_list '%s\n' "${successful_images[@]}"
           echo "images_list<<EOF" >> $GITHUB_OUTPUT
           echo "$images_list" >> $GITHUB_OUTPUT
@@ -64,7 +64,14 @@ jobs:
             7z a -v1023m "${tarfile}.7z" "$tarfile"
             rm "$tarfile"
           done
+          echo "=== Contents of images/ after compression ==="
+          ls -la
           cd ..
+
+      - name: Debug - List all generated files
+        run: |
+          echo "=== Directory tree of $GITHUB_WORKSPACE ==="
+          find . -type f -name "*.7z.*" -o -name "*.tar" | head -50
 
       - name: Prepare tag and release name
         id: release_info
