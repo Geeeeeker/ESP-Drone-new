@@ -1,4 +1,4 @@
-name: Build ESP-Drone Firmware (Native)
+name: Build ESP-Drone Firmware (IDF v4.4)
 
 on:
   workflow_dispatch:
@@ -39,7 +39,7 @@ on:
         type: boolean
 
 env:
-  IDF_VERSION: v5.0.4
+  IDF_VERSION: v4.4.8    # 改用稳定兼容版本
   IDF_PATH: /opt/esp/idf
 
 jobs:
@@ -72,7 +72,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-idf-${{ env.IDF_VERSION }}-
 
-      - name: Install ESP-IDF
+      - name: Install ESP-IDF v4.4.8
         if: steps.cache-idf.outputs.cache-hit != 'true'
         run: |
           sudo mkdir -p /opt/esp
@@ -88,21 +88,9 @@ jobs:
           chmod +x export.sh
           source ./export.sh
           echo "IDF_PATH=/opt/esp/idf" >> $GITHUB_ENV
-          echo "$HOME/.espressif/python_env/idf5.0_py3.11_env/bin" >> $GITHUB_PATH
+          echo "$HOME/.espressif/python_env/idf4.4_py3.11_env/bin" >> $GITHUB_PATH
 
-      # ---------- 修复补丁 ----------
-      - name: Fix deprecated component (esp_adc_cal -> esp_adc)
-        run: |
-          find . -name "CMakeLists.txt" -type f -exec sed -i 's/esp_adc_cal/esp_adc/g' {} \;
-          find . -name "*.c" -o -name "*.h" | xargs sed -i 's/#include "esp_adc_cal.h"/#include "esp_adc.h"/g' 2>/dev/null || true
-
-      - name: Patch mbedtls header path
-        run: |
-          AES_HEADER="$IDF_PATH/components/mbedtls/port/include/aes/esp_aes.h"
-          if [ -f "$AES_HEADER" ]; then
-            sudo sed -i 's|#include "hal/aes_types.h"|#include "soc/aes_types.h"|g' "$AES_HEADER"
-          fi
-
+      # ---------- 仅修补链接脚本 (param/log sections) ----------
       - name: Patch linker script (param/log sections)
         run: |
           BOARD_SHORT="${{ inputs.board }}"
@@ -138,7 +126,7 @@ jobs:
             idf.py reconfigure
           fi
           
-          # 提高 WiFi 功率
+          # 提高 WiFi 功率 (v4.4 中配置项可能不同，但保留)
           if [ "${{ inputs.phy_power_boost }}" == "true" ]; then
             echo "CONFIG_ESP32_PHY_MAX_TX_POWER=20" >> sdkconfig
             idf.py reconfigure
@@ -264,7 +252,7 @@ jobs:
           tag_name: ${{ needs.build_firmware.outputs.tag }}
           name: "ESP-Drone Release ${{ needs.build_firmware.outputs.tag }}"
           body: |
-            ## Firmware
+            ## Firmware (Built with ESP-IDF v4.4.8)
             - Chip: ${{ inputs.board }}
             - Custom pins: ${{ inputs.custom_pins || 'default' }}
             - WiFi TX power: ${{ inputs.phy_power_boost && '20dBm' || 'default' }}
@@ -273,6 +261,9 @@ jobs:
             - **Linux**: cfclient_linux_*.zip
             - **macOS**: cfclient_macos_*.zip
             - **Windows**: cfclient_windows_*.zip
+            
+            ## Note
+            This firmware is compiled with ESP-IDF v4.4.8 for compatibility.
           files: |
             artifacts/firmware_*/esp-drone-firmware-*.zip
             artifacts/cfclient_linux_*/cfclient-linux-*.zip
