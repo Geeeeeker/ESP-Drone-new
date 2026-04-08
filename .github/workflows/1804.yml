@@ -1,95 +1,39 @@
-name: Pull Docker Images and Upload to Release (7z Split)
+name: Pull and Upload Ubuntu 18.04 Docker Image (7z split)
 
 on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Release tag (leave empty for auto-generate)'
+        description: 'Release tag'
         required: false
-        default: ''
-      create_release:
-        description: 'Create a GitHub Release and upload artifacts'
-        required: true
-        default: true
-        type: boolean
+        default: 'ubuntu-18.04-docker'
 
 permissions:
   contents: write
 
 jobs:
-  pull-and-upload:
+  upload:
     runs-on: ubuntu-latest
     steps:
-      - name: Install 7-Zip
+      - name: Install 7z
         run: sudo apt-get update && sudo apt-get install -y p7zip-full
 
-      - name: Prepare directories
-        run: mkdir -p images
+      - name: Pull Ubuntu 18.04
+        run: docker pull ubuntu:18.04
 
-      - name: Pull and save images
-        id: pull_images
+      - name: Save, gzip, and split
         run: |
-          declare -A images=(
-            ["ubuntu:18.04"]="ubuntu_18.04.tar"
-            ["catthehacker/ubuntu:act-18.04"]="catthehacker_ubuntu_act-18.04.tar"
-          )
-          successful_images=()
-          for img in "${!images[@]}"; do
-            echo "Attempting to pull $img ..."
-            if docker pull "$img"; then
-              echo "Pull successful for $img"
-              outfile="${images[$img]}"
-              echo "Saving to $outfile ..."
-              docker save "$img" -o "images/$outfile"
-              successful_images+=("$img")
-            else
-              echo "Pull failed for $img, skipping."
-            fi
-          done
-          if [ ${#successful_images[@]} -eq 0 ]; then
-            echo "No images were successfully pulled. Exiting."
-            exit 1
-          fi
-          # 将镜像列表保存为多行文本
-          printf -v images_list '%s\n' "${successful_images[@]}"
-          echo "images_list<<EOF" >> $GITHUB_OUTPUT
-          echo "$images_list" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          docker save ubuntu:18.04 -o ubuntu_18.04.tar
+          gzip ubuntu_18.04.tar
+          7z a -v1023m ubuntu_18.04.tar.7z ubuntu_18.04.tar.gz
+          ls -lh ubuntu_18.04.tar.7z.*
 
-      - name: Compress and split images with 7z
-        run: |
-          cd images
-          for tarfile in *.tar; do
-            echo "Compressing and splitting $tarfile ..."
-            7z a -v1023m "${tarfile}.7z" "$tarfile"
-            rm "$tarfile"
-          done
-          echo "=== Contents of images/ after compression ==="
-          ls -la
-          cd ..
-
-      - name: Debug - List all generated files
-        run: |
-          echo "=== Directory tree of $GITHUB_WORKSPACE ==="
-          find . -type f -name "*.7z.*" -o -name "*.tar" | head -50
-
-      - name: Prepare tag and release name
-        id: release_info
-        run: |
-          TAG="${{ inputs.release_tag }}"
-          if [ -z "$TAG" ]; then
-            TAG="docker-images-$(date +'%Y%m%d-%H%M%S')"
-          fi
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "name=Docker Images ($TAG)" >> $GITHUB_OUTPUT
-
-      - name: Create GitHub Release and upload assets
-        if: inputs.create_release == true
+      - name: Create Release and upload
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.release_info.outputs.tag }}
-          name: ${{ steps.release_info.outputs.name }}
+          tag_name: ${{ inputs.release_tag }}
+          name: "Ubuntu 18.04 Docker Image (${{ inputs.release_tag }})"
           body: |
-            This release contains Docker images successfully pulled from Docker Hub.
+            Ubuntu 18.04 Docker image split into 1023MB volumes.
 
-            **Images included:**
+            Restore with:
