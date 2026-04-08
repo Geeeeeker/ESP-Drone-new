@@ -1,4 +1,4 @@
-name: Pull Docker Images and Upload to Release
+name: Pull Docker Images and Upload to Release (Split)
 
 on:
   workflow_dispatch:
@@ -23,47 +23,44 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Install 7-Zip
+        run: sudo apt-get update && sudo apt-get install -y p7zip-full
+
       - name: Prepare directories
         run: mkdir -p images
 
-      - name: Pull and save images
-        id: pull_images
-        continue-on-error: false
+      - name: Pull, save, split and upload images
+        id: process_images
         run: |
-          set -e
           declare -A images=(
-            ["ubuntu:18.04"]="ubuntu_18.04.tar"
-            ["catthehacker/ubuntu:act-18.04"]="catthehacker_ubuntu_act-18.04.tar"
+            ["ubuntu:18.04"]="ubuntu_18.04"
+            ["catthehacker/ubuntu:act-18.04"]="catthehacker_ubuntu_act-18.04"
           )
-          successful=()
+          successful_tags=()
           for img in "${!images[@]}"; do
-            echo "========================================="
-            echo "Processing: $img"
+            echo "Attempting to pull $img ..."
             if docker pull "$img"; then
-              echo "✅ Pull successful for $img"
-              outfile="${images[$img]}"
-              echo "Saving to images/$outfile ..."
-              docker save "$img" -o "images/$outfile"
-              if [ -f "images/$outfile" ]; then
-                echo "Compressing images/$outfile ..."
-                gzip "images/$outfile"
-                echo "✅ Created images/$outfile.gz"
-                successful+=("$img")
-              else
-                echo "❌ Failed to save $img"
-              fi
+              echo "Pull successful for $img"
+              base_name="${images[$img]}"
+              tar_file="images/${base_name}.tar"
+              echo "Saving to $tar_file ..."
+              docker save "$img" -o "$tar_file"
+              # 分卷压缩，每卷 1023MB (避免 GitHub 单文件 2GB 限制，同时适合 Release)
+              echo "Splitting into 7z volumes (1023MB each)..."
+              7z a -v1023m "images/${base_name}.7z" "$tar_file"
+              # 删除原始 tar 文件以节省空间
+              rm "$tar_file"
+              successful_tags+=("$img")
             else
-              echo "❌ Pull failed for $img, skipping."
+              echo "Pull failed for $img, skipping."
             fi
           done
-          if [ ${#successful[@]} -eq 0 ]; then
-            echo "No images were successfully pulled. Exiting with error."
+          # 输出成功列表
+          if [ ${#successful_tags[@]} -eq 0 ]; then
+            echo "No images were successfully pulled. Exiting."
             exit 1
           fi
-          echo "successful_images=${successful[@]}" >> $GITHUB_OUTPUT
-
-      - name: List saved images (debug)
-        run: ls -la images/
+          echo "successful_images=${successful_tags[@]}" >> $GITHUB_OUTPUT
 
       - name: Prepare tag and release name
         id: release_info
@@ -75,7 +72,7 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "name=Docker Images ($TAG)" >> $GITHUB_OUTPUT
 
-      - name: Create GitHub Release and upload assets
+      - name: Create GitHub Release and upload split archives
         if: inputs.create_release == true
         uses: softprops/action-gh-release@v2
         with:
@@ -85,10 +82,11 @@ jobs:
             This release contains Docker images successfully pulled from Docker Hub.
 
             **Images included:**
-            ${{ steps.pull_images.outputs.successful_images }}
+            ${{ steps.process_images.outputs.successful_images }}
 
-            Each image is saved as a `.tar.gz` file (gzipped Docker save format).
+            Each image is split into 7z volumes (1023MB each). To reassemble and load:
 
-            To load an image:
             ```bash
-            gunzip -c image.tar.gz | docker load
+            # Download all parts of an image, then:
+            7z x image.7z.001
+            docker load < image.tar
