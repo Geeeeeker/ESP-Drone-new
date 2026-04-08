@@ -50,13 +50,17 @@ jobs:
             echo "No images were successfully pulled. Exiting."
             exit 1
           fi
-          echo "successful_images=${successful_images[@]}" >> $GITHUB_OUTPUT
+          # 将镜像列表保存为换行分隔的字符串，用于 Release Body
+          printf -v images_list '%s\n' "${successful_images[@]}"
+          echo "images_list<<EOF" >> $GITHUB_OUTPUT
+          echo "$images_list" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Compress and split images with 7z
         run: |
           cd images
           for tarfile in *.tar; do
-            # 使用 7z 压缩并分卷为 1023MB（GitHub Release 单文件限制 2GB，这里使用 1023MB 保险）
+            echo "Compressing and splitting $tarfile ..."
             7z a -v1023m "${tarfile}.7z" "$tarfile"
             rm "$tarfile"
           done
@@ -82,13 +86,3 @@ jobs:
             This release contains Docker images successfully pulled from Docker Hub.
 
             **Images included:**
-            ${{ steps.pull_images.outputs.successful_images }}
-
-            Each image is saved as a `.tar.7z.001`, `.002`, etc. (split compressed archive using 7-Zip).
-
-            To reconstruct and load an image:
-            ```bash
-            # Download all parts to the same directory
-            # Combine and decompress
-            7z x ubuntu_18.04.tar.7z.001
-            docker load -i ubuntu_18.04.tar
