@@ -1,33 +1,8 @@
-name: Build ESP-Drone Firmware (IDF v4.4)
+name: Build cfclient (Cross-Platform)
 
 on:
   workflow_dispatch:
     inputs:
-      board:
-        description: 'Target chip'
-        required: true
-        default: 'esp32'
-        type: choice
-        options:
-          - esp32
-          - esp32s2
-          - esp32s3
-      custom_pins:
-        description: |
-          Custom pin assignments (key=value, one per line)
-          Example:
-          CONFIG_MPU6050_SCL=10
-          CONFIG_MPU6050_SDA=11
-          CONFIG_MOTOR1_PIN=5
-          CONFIG_LED_BLUE_PIN=7
-          CONFIG_CAM_VSYNC=13
-        required: false
-        default: ''
-      phy_power_boost:
-        description: 'Set WiFi TX power to 20dBm (higher power, faster battery drain)'
-        required: true
-        default: true
-        type: boolean
       release_tag:
         description: 'Release tag (leave empty for auto-generate)'
         required: false
@@ -38,136 +13,9 @@ on:
         default: true
         type: boolean
 
-env:
-  IDF_VERSION: v4.4.8    # 改用稳定兼容版本
-  IDF_PATH: /opt/esp/idf
-
 jobs:
-  build_firmware:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    outputs:
-      tag: ${{ steps.prepare_tag.outputs.tag }}
-    steps:
-      - name: Checkout firmware repository
-        uses: actions/checkout@v4
-        with:
-          submodules: 'recursive'
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Cache ESP-IDF and tools
-        id: cache-idf
-        uses: actions/cache@v3
-        with:
-          path: |
-            /opt/esp/idf
-            /opt/esp/tools
-            ~/.espressif
-          key: ${{ runner.os }}-idf-${{ env.IDF_VERSION }}-${{ hashFiles('.gitmodules') }}
-          restore-keys: |
-            ${{ runner.os }}-idf-${{ env.IDF_VERSION }}-
-
-      - name: Install ESP-IDF v4.4.8
-        if: steps.cache-idf.outputs.cache-hit != 'true'
-        run: |
-          sudo mkdir -p /opt/esp
-          sudo chown $USER:$USER /opt/esp
-          cd /opt/esp
-          git clone --depth 1 --branch ${{ env.IDF_VERSION }} https://github.com/espressif/esp-idf.git idf
-          cd idf
-          ./install.sh
-
-      - name: Set up environment
-        run: |
-          cd /opt/esp/idf
-          chmod +x export.sh
-          source ./export.sh
-          echo "IDF_PATH=/opt/esp/idf" >> $GITHUB_ENV
-          echo "$HOME/.espressif/python_env/idf4.4_py3.11_env/bin" >> $GITHUB_PATH
-
-      # ---------- 仅修补链接脚本 (param/log sections) ----------
-      - name: Patch linker script (param/log sections)
-        run: |
-          BOARD_SHORT="${{ inputs.board }}"
-          case "$BOARD_SHORT" in
-            esp32) LD_FILE="$IDF_PATH/components/esp32/ld/esp32.project.ld.in" ;;
-            esp32s2) LD_FILE="$IDF_PATH/components/esp32s2/ld/esp32s2.project.ld.in" ;;
-            esp32s3) LD_FILE="$IDF_PATH/components/esp32s3/ld/esp32s3.project.ld.in" ;;
-          esac
-          if [ -f "$LD_FILE" ] && ! grep -q "_param_start" "$LD_FILE"; then
-            sudo sed -i '/^SECTIONS$/a\
-              /* Parameters and log system datas */\
-              _param_start = .;\
-              KEEP(*(.param));\
-              KEEP(*(.param.*));\
-              _param_stop = .;\
-              . = ALIGN(4);\
-              _log_start = .;\
-              KEEP(*(.log));\
-              KEEP(*(.log.*));\
-              _log_stop = .;\
-              . = ALIGN(4);' "$LD_FILE"
-          fi
-
-      # ---------- 编译 ----------
-      - name: Configure target and build
-        run: |
-          source /opt/esp/idf/export.sh
-          idf.py set-target ${{ inputs.board }}
-          
-          # 应用自定义引脚
-          if [ -n "${{ inputs.custom_pins }}" ]; then
-            echo "${{ inputs.custom_pins }}" >> sdkconfig
-            idf.py reconfigure
-          fi
-          
-          # 提高 WiFi 功率 (v4.4 中配置项可能不同，但保留)
-          if [ "${{ inputs.phy_power_boost }}" == "true" ]; then
-            echo "CONFIG_ESP32_PHY_MAX_TX_POWER=20" >> sdkconfig
-            idf.py reconfigure
-          fi
-          
-          idf.py build
-
-      - name: Prepare tag
-        id: prepare_tag
-        run: |
-          TAG="${{ inputs.release_tag }}"
-          if [ -z "$TAG" ]; then
-            TAG="manual-$(date +'%Y%m%d-%H%M%S')"
-          fi
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "TAG=$TAG" >> $GITHUB_ENV
-
-      - name: Package firmware
-        id: package_fw
-        run: |
-          BOARD="${{ inputs.board }}"
-          TAG="${{ env.TAG }}"
-          FW_ARTIFACT="esp-drone-firmware-${BOARD}-${TAG}.zip"
-          mkdir -p fw_artifacts
-          cp build/*.bin fw_artifacts/ 2>/dev/null || true
-          cp build/bootloader/*.bin fw_artifacts/ 2>/dev/null || true
-          cp build/partition_table/*.bin fw_artifacts/ 2>/dev/null || true
-          zip -j "$FW_ARTIFACT" fw_artifacts/*.bin
-          echo "fw_artifact_path=$(realpath $FW_ARTIFACT)" >> $GITHUB_OUTPUT
-
-      - name: Upload firmware artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: firmware_${{ env.TAG }}
-          path: ${{ steps.package_fw.outputs.fw_artifact_path }}
-          if-no-files-found: error
-
-  # ========== 跨平台客户端打包（同上）==========
   build_client:
     runs-on: ${{ matrix.os }}
-    needs: build_firmware
     strategy:
       matrix:
         include:
@@ -231,13 +79,13 @@ jobs:
       - name: Upload client artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cfclient_${{ matrix.platform }}_${{ needs.build_firmware.outputs.tag }}
+          name: cfclient_${{ matrix.platform }}_${{ github.run_number }}
           path: ${{ steps.build.outputs.artifact_path }}
           if-no-files-found: error
 
   release:
     runs-on: ubuntu-latest
-    needs: [build_firmware, build_client]
+    needs: build_client
     if: inputs.create_release == true
     permissions:
       contents: write
@@ -249,23 +97,17 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: ${{ needs.build_firmware.outputs.tag }}
-          name: "ESP-Drone Release ${{ needs.build_firmware.outputs.tag }}"
+          tag_name: ${{ inputs.release_tag || format('client-{0}', github.run_number) }}
+          name: "ESP-Drone Client ${{ inputs.release_tag || github.run_number }}"
           body: |
-            ## Firmware (Built with ESP-IDF v4.4.8)
-            - Chip: ${{ inputs.board }}
-            - Custom pins: ${{ inputs.custom_pins || 'default' }}
-            - WiFi TX power: ${{ inputs.phy_power_boost && '20dBm' || 'default' }}
-            
             ## PC Client Downloads
             - **Linux**: cfclient_linux_*.zip
             - **macOS**: cfclient_macos_*.zip
             - **Windows**: cfclient_windows_*.zip
-            
-            ## Note
-            This firmware is compiled with ESP-IDF v4.4.8 for compatibility.
+
+            ## Firmware Compilation Guide
+            Please follow the instructions in the repository README to compile the firmware using **ESP-IDF v3.3**.
           files: |
-            artifacts/firmware_*/esp-drone-firmware-*.zip
             artifacts/cfclient_linux_*/cfclient-linux-*.zip
             artifacts/cfclient_macos_*/cfclient-macos-*.zip
             artifacts/cfclient_windows_*/cfclient-windows-*.zip
