@@ -26,35 +26,44 @@ jobs:
       - name: Prepare directories
         run: mkdir -p images
 
-      # 定义镜像列表（名称，输出文件名）
       - name: Pull and save images
         id: pull_images
+        continue-on-error: false
         run: |
+          set -e
           declare -A images=(
             ["ubuntu:18.04"]="ubuntu_18.04.tar"
             ["catthehacker/ubuntu:act-18.04"]="catthehacker_ubuntu_act-18.04.tar"
           )
-          successful_images=()
+          successful=()
           for img in "${!images[@]}"; do
-            echo "Attempting to pull $img ..."
+            echo "========================================="
+            echo "Processing: $img"
             if docker pull "$img"; then
-              echo "Pull successful for $img"
+              echo "✅ Pull successful for $img"
               outfile="${images[$img]}"
-              echo "Saving to $outfile ..."
+              echo "Saving to images/$outfile ..."
               docker save "$img" -o "images/$outfile"
-              # 压缩以减小大小
-              gzip "images/$outfile"
-              successful_images+=("$img")
+              if [ -f "images/$outfile" ]; then
+                echo "Compressing images/$outfile ..."
+                gzip "images/$outfile"
+                echo "✅ Created images/$outfile.gz"
+                successful+=("$img")
+              else
+                echo "❌ Failed to save $img"
+              fi
             else
-              echo "Pull failed for $img, skipping."
+              echo "❌ Pull failed for $img, skipping."
             fi
           done
-          # 输出成功列表供后续步骤使用
-          if [ ${#successful_images[@]} -eq 0 ]; then
-            echo "No images were successfully pulled. Exiting."
+          if [ ${#successful[@]} -eq 0 ]; then
+            echo "No images were successfully pulled. Exiting with error."
             exit 1
           fi
-          echo "successful_images=${successful_images[@]}" >> $GITHUB_OUTPUT
+          echo "successful_images=${successful[@]}" >> $GITHUB_OUTPUT
+
+      - name: List saved images (debug)
+        run: ls -la images/
 
       - name: Prepare tag and release name
         id: release_info
