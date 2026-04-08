@@ -113,17 +113,17 @@ jobs:
           esac
           if [ -f "$LD_FILE" ] && ! grep -q "_param_start" "$LD_FILE"; then
             sudo sed -i '/^SECTIONS$/a\
-  /* Parameters and log system datas */\
-  _param_start = .;\
-  KEEP(*(.param));\
-  KEEP(*(.param.*));\
-  _param_stop = .;\
-  . = ALIGN(4);\
-  _log_start = .;\
-  KEEP(*(.log));\
-  KEEP(*(.log.*));\
-  _log_stop = .;\
-  . = ALIGN(4);' "$LD_FILE"
+              /* Parameters and log system datas */\
+              _param_start = .;\
+              KEEP(*(.param));\
+              KEEP(*(.param.*));\
+              _param_stop = .;\
+              . = ALIGN(4);\
+              _log_start = .;\
+              KEEP(*(.log));\
+              KEEP(*(.log.*));\
+              _log_stop = .;\
+              . = ALIGN(4);' "$LD_FILE"
           fi
 
       # ---------- 编译 ----------
